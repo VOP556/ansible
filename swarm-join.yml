@@ -1,0 +1,9 @@
+- hosts: picluster
+  tasks:
+  - name: swarm-join
+    docker: 
+      name: swarm-join
+      image: hypriot/rpi-swarm
+      command: "join --advertise {{ansible_hostname}}:2375 consul://192.168.5.100:8500"
+      state: running
+

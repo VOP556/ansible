@@ -1,0 +1,35 @@
+---
+- hosts: picluster
+  tasks:
+  - name: setting hostname
+    hostname: name={{ inventory_hostname }}
+  - name: Change Password
+    user: name=pi password=$6$OE7o5JhG/8$a4YFCMKtF8vyGEJURvs7wvwbRtYhPJ5.7BUonzfuazWCEWiDLPtHZPTMijSDiQM3Nsope0.GPqf87sgUs7UlV/
+    tags:
+     - user
+  - name: setting memory-split
+    lineinfile: dest=/boot/config.txt line='gpu_mem=16'
+  - name: insert/update eth0 configuration /etc/dhcpcd.conf
+    blockinfile:
+      dest: /etc/dhcpcd.conf
+      block: |
+       interface eth0
+       static ip addr={{ ansible_eth0.ipv4.address}}
+       static routers=192.168.5.1
+       static domain_name_servers=192.168.5.250
+  - name: "change /etc/hosts-entries"
+    blockinfile:
+      dest: /etc/hosts
+      block: |
+       192.168.5.100   pi000
+       192.168.5.101   pi001
+       192.168.5.102   pi002
+       192.168.5.103   pi003
+       192.168.5.104   pi004
+       192.168.5.105   pi005
+       192.168.5.106   pi006
+  - name: "install updates and ntp"
+    apt: name= "{{ item }}" state=installed update_cache=yes upgrade=full
+    with_items:
+     - ntp
+

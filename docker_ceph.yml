@@ -1,0 +1,186 @@
+---
+- hosts: localhost
+  gather_facts: yes
+  tasks:
+  - name: create config-dir
+    file: path="{{ item }}" state=directory
+    with_items:
+     - "{{ ansible_env.HOME }}/ceph/var/lib"
+     - "{{ ansible_env.HOME }}/ceph/etc"
+- hosts: picluster
+  gather_facts: yes
+  tasks:
+  - name: create ssh-host-parts in /home/pi/.ssh/config
+    blockinfile:
+     dest: /home/pi/.ssh/config
+     create: yes
+     owner: pi
+     block: |
+      Host pi000
+        Hostname pi000
+        User pi
+      Host pi001
+        Hostname pi001
+        User pi
+      Host pi002
+        Hostname pi002
+        User pi
+      Host pi003
+        Hostname pi003
+        User pi
+      Host pi004
+        Hostname pi004
+        User pi
+      Host pi005
+        Hostname pi005
+        User pi
+      Host pi006
+        Hostname pi006
+        User pi
+
+
+- hosts: pi000
+  gather_facts: no
+  tasks:
+  - name: create ssh-key
+    user: name=pi generate_ssh_key=yes
+    tags:
+     - user
+  - name: get ssh-key
+    shell: cat /home/pi/.ssh/id_rsa.pub
+    register: result0
+    tags:
+     - user
+  - name: scan ssh Hostskeys
+    shell: "ssh-keyscan -H {{ item }} >> /home/pi/.ssh/known_hosts"
+    with_items: "{{ groups['picluster'] }}"
+    tags:
+     - user
+
+- hosts: picluster
+  gather_facts: no
+  tasks:
+  - name: Add ssh-key
+    authorized_key: user=pi key="{{ hostvars['pi000']['result0'].stdout }}"
+    tags:
+     - user
+  - name: "clean old installions: delete old containers"
+    docker:
+     name: "{{ item }}"
+     image: de13/rpi-ceph-daemon:latest
+     state: absent
+    with_items:
+     - ceph-mon
+     - ceph-osd
+
+  - name: "clean old installtions: remove configs"
+    file: path="{{ item }}" state=absent
+    with_items:
+     - /etc/ceph
+     - /var/lib/ceph
+
+  - name: "create config directories"
+    file: path="{{ item }}" state=directory
+    with_items:
+     - /etc/ceph
+     - /var/lib/ceph
+  - name: "install packages"
+    apt: name="{{ item }}" state=present
+    with_items:
+     - ceph-common
+     - golang
+- hosts: pi000
+  gather_facts: no
+  tasks:
+  - name: "prepare ceph-deploy: get monitors"
+    shell: echo "{{ item }}" >> "/home/pi/picluster.txt"
+    with_items:
+     - "{{ groups['picluster'] }}"
+  - name: create first monitor
+    docker: 
+     name: ceph-mon
+     image: de13/rpi-ceph-daemon:latest
+     state: started
+     net: host
+     restart_policy: unless-stopped
+     volumes:
+      - /etc/ceph:/etc/ceph
+      - /var/lib/ceph:/var/lib/ceph
+      - /var/run/ceph:/var/run/ceph
+     env:
+      MON_IP: "{{ ansible_default_ipv4.address }}"
+      CEPH_PUBLIC_NETWORK: "{{ ansible_default_ipv4.network }}/24"
+     command: MON
+
+  - name: pull config
+    synchronize:
+     src: "{{ item }}"
+     dest: "{{ ansible_env.HOME }}/ceph{{ item }}"
+     mode: pull
+    with_items:
+     - '/etc/ceph/'
+     - '/var/lib/ceph/'
+
+- hosts: picluster
+  gather_facts: no
+  tasks:
+  - name: push config
+    synchronize:
+     src: "{{ ansible_env.HOME }}/ceph{{ item  }}"
+     dest: "{{ item }}"
+     mode: push
+    with_items:
+     - '/etc/ceph/' 
+     - '/var/lib/ceph/' 
+
+  - name: create all other monitors
+    docker:
+     name: ceph-mon
+     image: de13/rpi-ceph-daemon:latest
+     state: started
+     net: host
+     restart_policy: unless-stopped
+     volumes:
+      - /etc/ceph:/etc/ceph
+      - /var/lib/ceph:/var/lib/ceph
+      - /var/run/ceph:/var/run/ceph
+     env:
+      MON_IP: "{{ ansible_default_ipv4.address }}"
+      CEPH_PUBLIC_NETWORK: "{{ ansible_default_ipv4.network }}/24"
+     command: MON
+    when: ansible_hostname != "pi000"
+
+- hosts: pi3
+  gather_facts: no
+  tasks:
+#  - name: "prepare OSDs: destroy disks"
+#    shell: dd if=/dev/zero of=/dev/sda bs=1024 count=1
+#  - name: "prepare OSDs: mklabel gpt"
+#    shell: parted -s /dev/sda mklabel gpt
+  - name: "prepare OSDs: destroy disks"
+    shell:  for i in $(lsblk | grep sd | grep disk | cut -d " " -f1); do dd if=/dev/zero of=/dev/$i bs=1024 count=1; done 
+  - name: "prepare OSDs: mklabel gpt"
+    shell:  for i in $(lsblk | grep sd | grep disk | cut -d " " -f1); do parted -s /dev/$i mklabel gpt; done 
+
+  - name: "create OSDs"
+ #   debug: msg="/dev/{{ item.key }}"
+    docker:
+     name: "ceph-osd-{{ item.key }}"
+     image: de13/rpi-ceph-daemon:latest
+     state: started
+     privileged: yes
+     net: host
+     restart_policy: unless-stopped
+     volumes:
+      - /etc/ceph:/etc/ceph
+      - /var/lib/ceph:/var/lib/ceph
+      - /dev:/dev
+      - /var/run/ceph:/var/run/ceph
+     env:
+      OSD_FORCE_ZAP=1
+      OSD_DEVICE="/dev/{{ item.key }}"
+     command: osd_ceph_disk
+    with_dict: "{{ ansible_devices }}"
+    when: item.key != "mmcblk0"
+    tags: 
+     - osd

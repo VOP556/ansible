@@ -1,0 +1,146 @@
+---
+- hosts: compiler
+  vars:
+    WORKDIR: "{{ ansible_env.HOME }}"
+    HOME: "{{ WORKDIR }}"
+  tasks:
+  - name: create kerneldirectory
+    file: path="{{ HOME }}/raspbian-kernel" state=directory
+
+- hosts: pi000
+  vars:
+    HOME: "{{ ansible_env.HOME }}"
+  tasks:
+  - name: extract config
+    shell: "{{ item }}"
+    with_items: 
+     - modprobe configs && zcat /proc/config.gz > "{{ HOME }}"/raspi_config
+     - echo $( echo $(uname -r | cut -d . -f1).$(echo $(uname -r | cut -d . -f2)).y ) > "{{ HOME }}"/raspi_kernel_version
+  - name: get config
+    fetch: src="{{ item }}" dest="{{ lookup('env', 'HOME') }}/" flat=yes
+    with_items:
+     - "{{ HOME }}/raspi_config"
+     - "{{ HOME }}/raspi_kernel_version"
+- hosts: compiler
+  vars: 
+   WORKDIR: "{{ ansible_env.HOME }}"
+   HOME: "{{ WORKDIR }}"
+   KERNEL: kernel-custom
+   RASP_FILE_ROOT: "{{ WORKDIR }}/raspbian-kernel/root"
+   FIRMWARE: "{{ WORKDIR }}/raspbian-kernel/firmware"
+   MODULES_TEMP: "{{ WORKDIR }}/raspbian-kernel/lib/modules"
+   CPU_COUNT: "{{ ansible_processor_vcpus }}"
+  tasks:
+  - name: push config
+    copy: src="{{ item }}" dest="{{ HOME }}/raspbian-kernel/" 
+    with_items:
+     - "{{ lookup('env', 'HOME') }}/raspi_config"
+     - "{{ lookup('env', 'HOME') }}/raspi_kernel_version"
+  - name: cleanup
+    file: path="{{ item }}" state=absent
+    with_items:
+     - "{{ lookup('env', 'HOME') }}/raspi_config"
+     - "{{ lookup('env', 'HOME') }}/raspi_kernel_version"
+  - name: getting KERNEL-Version
+    shell: echo $(cat "{{ HOME }}/raspbian-kernel/raspi_kernel_version") 
+    register: KERNEL_VERSION
+  - name: setting KERNEL_SRC
+    command: echo "{{ HOME }}/raspbian-kernel/rpi-{{ KERNEL_VERSION.stdout }}"
+    register: KERNEL_SRC
+  - name: setting CCPREFIX
+    command: echo "{{ HOME }}/raspbian-kernel/tools/arm-bcm2708/gcc-linaro-arm-linux-gnueabihf-raspbian-x64/bin/arm-linux-gnueabihf-"
+    register: result
+    when: ansible_architecture == "x86_64"
+  - set_fact: CCPREFIX={{ result.stdout }}
+    when: result|success
+  - name: setting CCPREFIX
+    command: echo "{{ HOME }}/raspbian-kernel/tools/arm-bcm2708/gcc-linaro-arm-linux-gnueabihf-raspbian/bin/arm-linux-gnueabihf-"
+    register: CCPREFIX
+    when: ansible_architecture == "x86"
+  - set_fact: CCPREFIX={{ result.stdout }}
+    when: result|success
+  - name: ensure prerequesits
+    apt: name="{{ item }}" update_cache=yes
+    with_items:
+     - libncurses5-dev
+     - git
+     - make
+  - name: clean kernel sources
+    shell: "rm -rf {{ item }}" 
+    with_items:
+     - "{{ HOME }}/raspbian-kernel/linux"
+     - "{{ RASP_FILE_ROOT }}"
+  - name: "create kerneldirectory"
+    file: path="{{ item }}" state=directory
+    with_items:
+     - "{{ HOME }}/raspbian-kernel"
+     - "{{ KERNEL_SRC.stdout }}"
+     - "{{ MODULES_TEMP }}"
+     - "{{ RASP_FILE_ROOT }}"
+  - name: Get ARM Compiler
+    git: repo=https://github.com/raspberrypi/tools dest="{{ HOME }}/raspbian-kernel/tools"
+  - name: Get current Kernel Sources
+    shell: "{{ item }}" 
+    args:
+     chdir: "{{ KERNEL_SRC.stdout }}"
+    with_items:
+     - "git init && git fetch https://github.com/raspberrypi/linux.git rpi-{{ KERNEL_VERSION.stdout }}:refs/remotes/origin/rpi-{{ KERNEL_VERSION.stdout }} && git fetch https://github.com/raspberrypi/linux.git rpi-{{ KERNEL_VERSION.stdout }}:refs/remotes/origin/rpi-{{ KERNEL_VERSION.stdout }} && git checkout refs/remotes/origin/rpi-{{ KERNEL_VERSION.stdout }}"
+     - make mrproper
+     - cp "{{ HOME }}/raspbian-kernel/raspi_config" "./.config"
+  - name: "configure .config"
+    lineinfile: backrefs=yes regexp="{{ item.searchstring }}" line="{{ item.replacestring }}" dest="{{ KERNEL_SRC.stdout }}/.config"
+    with_items:
+     - { searchstring: '^%CONFIG_BLK_DEV_RBD', replacestring: 'CONFIG_BLK_DEV_RBD=m' }
+  - debug: msg= "{{ CCPREFIX }}"
+  - name: "compile kernel ... could took very long"
+    shell: "{{ item }}"
+    args:
+     chdir: "{{ KERNEL_SRC.stdout }}"
+    with_items:
+     - "ARCH=arm CROSS_COMPILE={{ CCPREFIX }} make -j 4 olddefconfig"
+     - "ARCH=arm CROSS_COMPILE={{ CCPREFIX }} make -j 4  zImage modules dtbs"
+     - "ARCH=arm CROSS_COMPILE={{ CCPREFIX }} INSTALL_MOD_PATH={{ MODULES_TEMP }} make modules_install"
+  - name: move lib to temp_root
+    shell: "mv -f lib {{ RASP_FILE_ROOT }}" 
+    args:
+     chdir: "{{ MODULES_TEMP }}"
+    tags:
+     - archive
+  - name: get things together
+    shell: "{{ item }}"
+    args:
+     chdir: "{{ KERNEL_SRC.stdout }}"
+    with_items:
+     - "mkdir -p {{ RASP_FILE_ROOT }}/boot/overlays"
+     - "{{ KERNEL_SRC.stdout }}/scripts/mkknlimg {{ KERNEL_SRC.stdout }}/arch/arm/boot/zImage {{ RASP_FILE_ROOT }}/boot/{{ KERNEL }}.img"
+     - "cp {{ KERNEL_SRC.stdout }}/arch/arm/boot/dts/*.dtb {{ RASP_FILE_ROOT }}/boot/"
+     - "cp {{ KERNEL_SRC.stdout }}/arch/arm/boot/dts/overlays/*.dtb* {{ RASP_FILE_ROOT }}/boot/overlays"
+     - "cp {{ KERNEL_SRC.stdout }}/arch/arm/boot/dts/overlays/README {{ RASP_FILE_ROOT }}/boot/overlays"
+    tags:
+     - archive
+  - name: "getting latest firmware and copy to temp_root"
+    shell: "{{ item }}"
+    args:
+     chdir: "{{ HOME }}/raspbian-kernel"
+    with_items:
+     - "git clone --depth=1 https://github.com/raspberrypi/firmware.git && cd ./firmware && git checkout refs/remotes/origin/master"
+     - "cp ./firmware/boot/bootcode.bin {{ RASP_FILE_ROOT }}/boot"
+     - "cp ./firmware/boot/fixup*.dat {{ RASP_FILE_ROOT }}/boot"
+     - "cp ./firmware/boot/start*.elf {{ RASP_FILE_ROOT }}/boot"
+     - "mkdir -p {{ RASP_FILE_ROOT }}/opt"
+     - "cd ./firmware/hardfp/opt && cp -r . {{ RASP_FILE_ROOT }}/opt"
+    tags:
+     - archive
+  - name: "create archive in {{ HOME }}"
+    shell: "{{ item }}"
+    args:
+     chdir: "{{ RASP_FILE_ROOT }}"
+    with_items:
+     - "tar -cvf {{ HOME }}/raspbian-kernel/kernel.tar ."
+     - "gzip {{ HOME }}/raspbian-kernel/kernel.tar"
+    tags:
+     -archive
+  - name: "fetch kernel from compiler host"
+    fetch: src="{{ HOME }}/raspbian-kernel/kernel.tar.gz" dest="{{ lookup('env', 'HOME') }}/" flat=yes
+  - name: cleanup WORKDIR
+    file: path="{{ HOME }}/raspbian-kernel" state=absent    

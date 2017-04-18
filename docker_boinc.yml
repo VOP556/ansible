@@ -1,0 +1,34 @@
+---
+- hosts: picluster
+  vars: 
+   PASSWORD: "Passw0rD"
+   HOST1: "veritas.adds.burningmountain.de"
+   HOST2: "192.168.5.163"
+   BUILDPATH: "/home/pi/docker/boinc"
+  tasks:
+  - name: "Create build directory"
+    file: path="{{ BUILDPATH }}" state=directory
+  - name: "Create Dockerfile"
+    blockinfile: 
+     dest: "{{ BUILDPATH }}/Dockerfile"
+     create: yes
+     block: |
+      FROM sdhibit/rpi-raspbian
+      RUN echo "deb http://veritas:83/raspbian jessie main" > /etc/apt/sources.list
+      RUN apt-get update && apt-get -y upgrade && apt-get -y install boinc-client && apt-get clean
+      RUN echo "{{ HOST1 }}" >> /etc/boinc-client/remote_hosts.cfg && echo "{{ HOST2 }}" >> /etc/boinc-client/remote_hosts.cfg
+      RUN echo "{{ PASSWORD }}" > /etc/boinc-client/gui_rpc_auth.cfg
+      ENTRYPOINT ["boinc", "--attach_project", "http://www.worldcommunitygrid.org", "2a9f5fca31fbb528c082b5892841e0bd", "--no_gui_rpc"]
+  - name: "Build DockerImage"
+    docker_image:
+     repository: localhost
+     name: vop556/boinc
+     path: "{{ BUILDPATH }}"
+    ignore_errors: yes
+  - name: "Docker run container from image"
+    docker:
+     image: vop556/boinc
+     name: boinc
+     state: running
+     net: host
+     volumes: /dev/:/dev/

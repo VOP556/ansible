@@ -1,0 +1,48 @@
+---
+- hosts: pi000
+  tasks:
+  - name: prepare consul
+    file: path=/data state=directory
+  - name: consul
+    docker:
+     name: consul
+     image: hypriot/rpi-consul
+     state: running
+     net: host
+     command: "agent -server -data-dir /data -bootstrap-expect 1  -ui-dir=/ui -advertise='{{ ansible_default_ipv4.address }}' -bind='{{ ansible_default_ipv4.address }}' -client='{{ ansible_default_ipv4.address }}'"
+     ports: "8500:8500"
+     expose: 8500
+     volumes: /data
+     restart_policy: unless-stopped
+
+- hosts: picluster
+  tasks:
+  - name: "configure consul-connection"
+    lineinfile: dest=/etc/systemd/system/docker.service.d/overlay.conf regexp="^ExecStart=/usr/bin/dockerd" line="ExecStart=/usr/bin/dockerd --storage-driver overlay -H fd:// -H tcp://0.0.0.0:2375 --cluster-store consul://192.168.5.100:8500 --cluster-advertise=eth0:2375"
+    notify:
+      - reload systemd
+      - restart docker
+  - name: creating swarm-master
+    docker: 
+     name: swarm-master 
+     image: hypriot/rpi-swarm 
+     state: running 
+     command: "manage -H 0.0.0.0:6000 --replication --advertise '{{ ansible_default_ipv4.address }}':6000 --discovery-opt='kv.path=docker/nodes' consul://192.168.5.100:8500"  
+     ports: "6000:6000" 
+     expose: 6000
+     restart_policy: unless-stopped
+
+  - name: swarm-join
+    docker:
+      name: swarm-join
+      image: hypriot/rpi-swarm
+      command: "join --advertise {{ansible_hostname}}:2375 consul://192.168.5.100:8500"
+      state: running
+      restart_policy: unless-stopped
+
+  handlers:
+  - name: reload systemd
+    command: systemctl daemon-reload
+  - name: restart docker
+    command: systemctl restart docker.service
+

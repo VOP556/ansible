@@ -1,0 +1,6 @@
+---
+- include: /etc/ansible/post-install.yml
+- include: /etc/ansible/install_kernel.yml
+- include: /etc/ansible/ceph.yml
+- include: /etc/ansible/docker.yml
+- include: /etc/ansible/swarm.yml

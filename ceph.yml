@@ -1,0 +1,370 @@
+---
+- hosts: picluster
+  tasks: 
+  - name: "Installing prerequesites for ceph-cluster"
+    apt: name="{{ item }}" update_cache=yes
+    with_items: 
+     - screen
+     - htop 
+     - iotop 
+     - btrfs-tools 
+     - lsb-release 
+     - gdisk
+     - parted
+     - python-pip
+     - ntp
+    tags:
+     - prerequisites
+     - package
+  - name: Create Ceph-User
+    user: name=ceph password=$6$OE7o5JhG/8$a4YFCMKtF8vyGEJURvs7wvwbRtYhPJ5.7BUonzfuazWCEWiDLPtHZPTMijSDiQM3Nsope0.GPqf87sgUs7UlV/ shell=/bin/bash home=/home/ceph
+    tags:
+     - user
+  - name: make user ceph a sudoer
+    lineinfile: dest=/etc/sudoers.d/ceph line="ceph ALL = (root) NOPASSWD:ALL" mode=0440 create=yes
+    tags:
+     - user
+  - name: create /home/ceph/.ssh/
+    file: path=/home/ceph/.ssh state=directory owner=ceph
+    tags:
+     - user
+  - name: create ssh-host-parts in /home/ceph/.ssh/config
+    blockinfile:    
+     dest: /home/ceph/.ssh/config 
+     create: yes 
+     owner: ceph
+     block: |
+      Host pi000
+        Hostname pi000
+        User ceph
+      Host pi001
+        Hostname pi001
+        User ceph
+      Host pi002
+        Hostname pi002
+        User ceph
+      Host pi003
+        Hostname pi003
+        User ceph
+      Host pi004
+        Hostname pi004
+        User ceph
+      Host pi005
+        Hostname pi005
+        User ceph
+      Host pi006
+        Hostname pi006
+        User ceph
+    tags:
+     - user
+#  - name: remove default respository
+#    apt_repository: repo='deb http://mirrordirector.raspbian.org/raspbian/ jessie main contrib non-free rpi' state=absent
+#    tags:
+#     - package
+#     - repo
+#  - name: add testing respository
+#    apt_repository: repo='deb http://mirrordirector.raspbian.org/raspbian/ testing main contrib non-free rpi' state=present
+#    tags:
+#     - package
+#     - repo
+#  - name: Add release key to apt
+#    shell: wget -q -O- 'https://download.ceph.com/keys/release.asc' | sudo apt-key add -
+#    apt_key: url=https://download.ceph.com/keys/release.asc state=present
+#    tags:
+#     - package
+#     - repo
+#  - name: Add respository ceph.com
+#    apt_repository: repo='deb http://ceph.com/debian-hammer/ jessie main' state=present
+#    tags:
+#     - package
+#     - repo
+  - name: change /etc/sysctl.conf 
+    blockinfile:
+     dest: /etc/sysctl.conf
+     block: |
+      vm.swappiness=1
+      vm.min_free_kbytes = 32768
+      kernel.pid_max = 32768
+    tags:
+     - config
+  
+- hosts: pi000
+  tasks:     
+  - name: create ssh-key
+    user: name=ceph generate_ssh_key=yes
+    tags:
+     - user
+  - name: get ssh-key
+    shell: cat /home/ceph/.ssh/id_rsa.pub
+    register: result0
+    tags:
+     - user
+  - name: scan ssh Hostskeys
+    become_user: ceph
+    shell: ssh-keyscan -H {{ item }} >> /home/ceph/.ssh/known_hosts
+    with_items: "{{ groups['picluster'] }}"
+    tags:
+     - user
+  - name: Installing ceph deploy
+    pip:
+     name: ceph-deploy
+     version: 1.5.25
+    tags:
+     - package
+
+- hosts: picluster
+  tasks:
+  - name: Add ssh-key
+    authorized_key: user=ceph key="{{ hostvars['pi000']['result0'].stdout }}"
+    tags:
+     - user
+
+- hosts: pi000
+  tasks:
+  - name:  "prepare ceph-deploy: cleanup old installations"
+    file: path=/home/ceph/ceph-pi-cluster state=absent
+    tags:
+     - package
+     - config
+  - name: make ceph config Directory under /home/ceph/ceph-pi-cluster
+    file: path=/home/ceph/ceph-pi-cluster state=directory owner=ceph
+    tags:
+     - package
+     - config
+
+- hosts: picluster
+  tasks:
+  - name: install ceph-package to speed up deployment
+    apt: name="{{ item }}" update_cache=yes
+    with_items:
+     - ceph
+     - ceph-common
+     - ceph-mds
+     - ceph-fs-common
+     - radosgw
+     - librados-dev 
+     - librbd-dev
+     - golang
+    tags:
+     - package
+
+- hosts: pi000
+  tasks:
+  - name: "prepare ceph-deploy: get monitors"
+    shell: echo "{{ item }}" >> /home/ceph/ceph-pi-cluster/monitors.txt
+    with_items:
+     - "{{ groups['ceph-mon'] }}"
+    tags:
+     - config
+  - name: "prepare ceph-deploy: ceph-deploy new"
+    become_user: ceph
+    shell: ceph-deploy new $(echo $(cat /home/ceph/ceph-pi-cluster/monitors.txt) ) chdir=/home/ceph/ceph-pi-cluster
+    tags:
+     - mon
+     - config
+  - name: "prepare ceph-deploy: setting ceph parameters in /home/ceph/ceph-pi-cluster/ceph.conf"
+    blockinfile:
+     dest: /home/ceph/ceph-pi-cluster/ceph.conf
+     block: |
+      # Disable in-memory logs
+      debug_lockdep = 0/0
+      debug_context = 0/0
+      debug_crush = 0/0
+      debug_buffer = 0/0
+      debug_timer = 0/0
+      debug_filer = 0/0
+      debug_objecter = 0/0
+      debug_rados = 0/0
+      debug_rbd = 0/0
+      debug_journaler = 0/0
+      debug_objectcatcher = 0/0
+      debug_client = 0/0
+      debug_osd = 0/0
+      debug_optracker = 0/0
+      debug_objclass = 0/0
+      debug_filestore = 0/0
+      debug_journal = 0/0
+      debug_ms = 0/0
+      debug_monc = 0/0
+      debug_tp = 0/0
+      debug_auth = 0/0
+      debug_finisher = 0/0
+      debug_heartbeatmap = 0/0
+      debug_perfcounter = 0/0
+      debug_asok = 0/0
+      debug_throttle = 0/0
+      debug_mon = 0/0
+      debug_paxos = 0/0
+      debug_rgw = 0/0
+      osd heartbeat grace = 8
+      [mon]
+      mon compact on start = true
+      mon osd down out subtree_limit = host
+      [osd]
+      public network = 192.168.5.0/24
+      # Filesystem Optimizations
+      osd mkfs type = xfs
+      osd journal size = 1024
+      # Performance tuning
+      max open files = 327680
+      osd op threads = 2
+      filestore op threads = 2
+      #Capacity Tuning
+      osd backfill full ratio = 0.95
+      mon osd nearfull ratio = 0.90
+      mon osd full ratio = 0.95
+      # Recovery tuning
+      osd recovery max active = 1
+      osd recovery max single start = 1
+      osd max backfills = 1
+      osd recovery op priority = 1
+      # Optimize Filestore Merge and Split
+      filestore merge threshold = 40
+      filestore split multiple = 8
+    tags:
+     - mon
+     - config
+#  - name: install ceph packages with ceph-deploy install
+#    become_user: ceph
+#    shell: ceph-deploy install "{{ item }}" chdir=/home/ceph/ceph-pi-cluster
+#    with_items:
+#     - "{{ groups['picluster'] }}"
+#    tags:
+#     - package
+#     - mon
+  - name: CREATING INITIAL MONITORS
+    become_user: ceph
+    command: ceph-deploy mon create-initial chdir=/home/ceph/ceph-pi-cluster
+    tags:
+     - mon
+     - config
+- hosts: ceph-mon
+  tasks:
+  - name: GRANT ceph.client.admin.keyring ACCESS
+    file: path=/etc/ceph/ceph.client.admin.keyring mode=0644 
+    tags:
+     - mon
+     - config
+- hosts: pi000
+  tasks:
+  - name: push admin-config to all nodes
+    become_user: ceph
+    shell: ceph-deploy admin "{{ item }}" chdir=/home/ceph/ceph-pi-cluster
+    with_items:
+     - "{{ groups['picluster'] }}"
+    tags:
+     - mon
+     - config
+
+- hosts: pi3
+  tasks:
+  - name: "prepare OSDs: destroy disks"
+    shell:  for i in $(ssh "{{ item }}" 'lsblk | grep sd | grep disk | cut -d " " -f'1); do dd if=/dev/zero of=/dev/$i bs=1024 count=1; done chdir=/home/ceph/ceph-pi-cluster
+  - name: "prepare OSDs: mklabel gpt"
+    shell:  for i in $(ssh "{{ item }}" 'lsblk | grep sd | grep disk | cut -d " " -f'1); do parted -s /dev/$i mklabel gpt; done chdir=/home/ceph/ceph-pi-cluster
+
+- hosts: pi000
+  tasks:
+  - name: "CREATING OSDs (OBJECT STORAGE DAEMONS): zap usb-keys"
+    become_user: ceph
+    shell: for i in $(ssh "{{ item }}" 'lsblk | grep sd | grep disk | cut -d " " -f'1); do ceph-deploy disk zap "{{ item }}":/dev/$i; done chdir=/home/ceph/ceph-pi-cluster
+    with_items:
+     - "{{ groups['pi3'] }}"
+    tags:
+     - osd
+     - config
+  
+- hosts: pi3
+  tasks:
+  - name: "CREATING OSDs (OBJECT STORAGE DAEMONS): repartition usb-keys"
+    shell: for i in $(lsblk | grep sd | grep disk | cut -d " " -f1); do parted -s /dev/$i mklabel gpt mkpart ceph 0% 90% mkpart journal 91% 100%; done
+    tags:
+     - osd
+     - config
+  - file: path=/home/ceph/partitions state=absent
+    tags: 
+     - osd
+     - config
+  - file: path=/home/ceph/partitions state=touch
+    tags:
+     - osd
+     - config
+
+- hosts: pi3
+  tasks:
+#  - name: "CREATING OSDs (OBJECT STORAGE DAEMONS): get partitions"
+#    shell: for i in $(echo "{{ item.value.partitions.keys() | join(" ")  }}" ) ; do echo "/dev/$i" >> /home/ceph/partitions ;done
+#    with_dict: "{{ ansible_devices }}"
+#    when: item.key != "mmcblk0"
+#    tags:
+#     - osd
+#     - config
+#  - name: "CREATING OSDs (OBJECT STORAGE DAEMONS): get partitions"
+#    shell: cat /home/ceph/partitions
+#    register: partitions
+#    tags:
+#     - osd
+#     - config
+#  - name: "CREATING OSDs (OBJECT STORAGE DAEMONS): make xfs filesystems"
+#    filesystem: dev="{{ item }}" fstype=xfs force=yes 
+#    with_items: "{{ partitions.stdout_lines}}"
+#    tags:
+#     - osd
+#     - config
+- hosts: pi000
+  tasks:
+  - name: "CREATING OSDs (OBJECT STORAGE DAEMONS): prepare OSDs"
+    become_user: ceph
+#    shell: for usbkey in $(ssh "{{ item }}" lsblk | grep sd | grep disk | cut -d " " -f1); do ceph-deploy osd prepare "{{ item }}":$(echo $usbkey"1"):$(echo $usbkey"2"); done chdir=/home/ceph/ceph-pi-cluster
+    shell: for usbkey in $(ssh "{{ item }}" lsblk | grep sd | grep disk | cut -d " " -f1); do ceph-deploy osd prepare "{{ item }}":$usbkey; done chdir=/home/ceph/ceph-pi-cluster
+
+    with_items:
+     - "{{ groups['pi3'] }}"
+    tags:
+     - config
+     - osd
+  - name: "CREATING OSDs (OBJECT STORAGE DAEMONS): activate  OSDs"
+    become_user: ceph
+#    shell: for usbkey in $(ssh "{{ item }}" lsblk | grep sd | grep disk | cut -d " " -f1); do ceph-deploy osd activate "{{ item }}":$(echo $usbkey"1"):$(echo $usbkey"2"); done chdir=/home/ceph/ceph-pi-cluster
+    shell: for usbkey in $(ssh "{{ item }}" lsblk | grep sd | grep disk | cut -d " " -f1); do ceph-deploy osd activate "{{ item }}":$usbkey; done chdir=/home/ceph/ceph-pi-cluster
+    with_items:
+     - "{{ groups['pi3'] }}"
+    tags:
+     - config
+     - osd
+
+#- hosts: picluster
+#  tasks:
+#  - name: remove testing respository
+#    apt_repository: repo='deb http://mirrordirector.raspbian.org/raspbian/ testing main contrib non-free rpi' state=absent
+#    tags:
+#     - package
+#     - repo
+#  - name: add default respository
+#    apt_repository: repo='deb http://mirrordirector.raspbian.org/raspbian/ jessie main contrib non-free rpi' state=present
+#    tags:
+#     - package
+#     - repo
+
+
+- hosts: ceph-mon
+  tasks:
+  - name: enable monitors
+    shell: systemctl enable ceph-mon.service
+    tags:
+     - config
+     - service
+
+- hosts: pi3
+  tasks:
+  - name: enable OSDs
+    shell: for i in $(ls /var/lib/ceph/osd/ | cut -d - -f2); do systemctl enable -l ceph-osd@$i ;done
+    tags:
+     - config
+     - service
+  - name: "generate mountpoint in fstab"
+    shell:  for i in "$(mount | grep '/dev/sd')"; do echo "/dev/disk/by-uuid/"$(ls -l  /dev/disk/by-uuid/ | grep $(echo $(echo $i | cut -d ' ' -f1 | cut -d '/' -f3  )) | cut -d " " -f9)" "$(echo $i | cut -d ' ' -f3  )" "$(echo $i | cut -d ' ' -f5  )" "$(echo $i | cut -d ' ' -f6 | sed s/"("// | sed s/")"//) >> /etc/fstab  ;done
+    tags:
+     - mount
+     - config
+     - service
